@@ -1,6 +1,7 @@
 (ns clj-stacktrace.repl
   (:use clj-stacktrace.core)
-  (:require [clj-stacktrace.utils :as utils]))
+  (:require [clj-stacktrace.utils :as utils]
+            [clojure.pprint :as pprint]))
 
 (def color-codes
   {:red     "\033[31m"
@@ -74,10 +75,50 @@
       (.append on "\n")
       (.flush on))))
 
+(defmacro def-formatter
+  "Defines a function named 'name' taking as args an output stream and
+  'args' that will produce a formatted string using the formats
+  described in 'vecs'. Each item of 'vecs' must be a vector that
+  starts with a pprint format string and is followed by the arguments
+  expected by that format string. The function defined by this macro
+  contains a pre-compiled formatter and should thus run faster than
+  equivalent calls to clojure.pprint/cl-format."
+  [name args & vecs]
+  (let [format-in (apply str (map first vecs))
+        arg-forms (apply concat (map rest vecs))]
+    `(let [f# (pprint/formatter ~format-in)]
+       (defn ~name [on# ~@args]
+         (f# on# ~@arg-forms)))))
+
+(def-formatter pst-multicol-elem-on [color? elem widths]
+  ["  ~A"      (if color? (color-codes (elem-color elem)) "")]
+  ["~v@A"      (:ns widths 4) (or (:ns elem) (:class elem))]
+  ["~A"        (if (:java elem) "." "/")]
+  ["~v,,,'.A"  (inc (:fn widths 4)) (str (or (:fn elem) (:method elem)) " ")]
+  ["~v,,,'.@A" (inc (:file widths 4)) (str " " (:file elem))]
+  [":~S"       (:line elem)]
+  ["~A~%"      (if color? (color-codes :default) "")])
+
+(defn pst-multicol-elems-on
+  [^java.io.Writer on color? parsed-elems widths]
+  (doseq [elem parsed-elems]
+    (pst-multicol-elem-on on color? elem widths))
+  (.flush on))
+
 (defn pst-caused-by-on
   [^java.io.Writer on color?]
   (.append on ^String (colored color? :red "Caused by: "))
   (.flush on))
+
+(defn pst-message-prefix-on
+  [^java.io.Writer on color? parsed-exception]
+  (let [text (if (nil? (:class parsed-exception))
+               "Smuggled: "
+               (if (:cause parsed-exception)
+                 "Rethrown as "
+                 "Root cause "))]
+    (.append on ^String (colored color? :red text))
+    (.flush on)))
 
 (defn- pst-cause-on
   [^java.io.Writer on color? exec source-width]
@@ -88,28 +129,57 @@
   (if-let [cause (:cause exec)]
     (pst-cause-on on color? cause source-width)))
 
+(defn find-width [coll & fns]
+  (let [counts (for [x coll] (count (some #(% x) fns)))]
+    #_(utils/fence (sort counts))
+    (apply max counts)))
+
 (defn find-source-width
   "Returns the width of the longest source-string among all trace elems of the
   excp and its causes."
   [excp]
-  (let [this-source-width (->> (:trace-elems excp)
-                               (map (comp count source-str))
-                               (sort)
-                               (utils/fence))]
+  (let [this-source-width (find-width (:trace-elems excp) source-str)]
     (if-let [cause (:cause excp)]
       (max this-source-width (find-source-width cause))
       this-source-width)))
 
+(defn- find-column-widths
+  [elems]
+  {:ns (find-width elems :ns :class)
+   :fn (find-width elems :fn :method)
+   :file (find-width elems :file)})
+
+(defn pst-parsed-on [on color? parsed-exception]
+  (let [source-width (find-source-width parsed-exception)]
+    (pst-class-on on color? (:class parsed-exception))
+    (pst-message-on on color? (:message parsed-exception))
+    (pst-elems-on on color? (:trace-elems parsed-exception) source-width)
+    (if-let [cause (:cause parsed-exception)]
+      (pst-cause-on on color? cause source-width))))
+
+(defn pst-multicol-on [on color? e-seq]
+  "Prints to the given Writer on a pretty stack trace for the given
+  parsed exception seq e-seq, with separate columns for class/namespace,
+  method/function, filename, and line number. Prints ANSI color codes
+  if color? is true."
+  (let [e-seq (shorten-messages e-seq)
+        column-widths (find-column-widths (mapcat :trimmed-elems e-seq))]
+    (doseq [e e-seq]
+      (pst-message-prefix-on on color? e)
+      (when (:class e)
+        (pst-class-on on color? (:class e)))
+      (pst-message-on on color? (:message e))
+      (pst-multicol-elems-on on color?
+                             (collapse-elems (or (:trimmed-elems e)
+                                                 (:trace-elems e)))
+                             column-widths))))
+
+
+
 (defn pst-on [on color? e]
   "Prints to the given Writer on a pretty stack trace for the given exception e,
   ANSI colored if color? is true."
-  (let [exec         (parse-exception e)
-        source-width (find-source-width exec)]
-    (pst-class-on on color? (:class exec))
-    (pst-message-on on color? (:message exec))
-    (pst-elems-on on color? (:trace-elems exec) source-width)
-    (if-let [cause (:cause exec)]
-      (pst-cause-on on color? cause source-width))))
+  (pst-parsed-on on color? (parse-exception e)))
 
 (defn pst
   "Print to *out* a pretty stack trace for an exception, by default *e."
@@ -120,3 +190,12 @@
   "Like pst, but with ANSI terminal color coding."
   [& [e]]
   (pst-on *out* true (or e *e)))
+
+(defmacro with-pst
+  [pst-form & body]
+  `(try
+     ~@body
+     (catch Throwable t#
+       (safety-net t# (->> t# ~pst-form))
+       (when (instance? Error t#)
+         (throw t#)))))
