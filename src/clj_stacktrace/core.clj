@@ -124,3 +124,81 @@
     (if-let [cause (.getCause e)]
       (assoc base :cause (parse-cause-exception cause parsed-elems))
       base)))
+
+(defn cause-seq [e]
+  "Takes a parsed exception and returns a seq of parsed exception
+  causes, starting with the root cause and proceeding to the final or
+  outer-most cause. Note this order is reversed compared to the order
+  used by .printStackTrace and clojure.repl/pst"
+  (->> e
+       (iterate :cause)
+       (take-while identity)
+       reverse
+       seq))
+
+;; XXX test these -- some may not be working or needed
+(def tag-map
+  {["clojure.lang.AFn" "applyToHelper"] :apply
+   ["clojure.lang.AFn" "applyTo"] :apply
+   ["clojure.lang.AFn" "run"] :invoke
+   ["clojure.lang.RestFn" "applyTo"] :apply
+   ["clojure.lang.RestFn" "invoke"] :invoke
+   ["clojure.lang.MultiFn" "invoke"] :invoke
+   ["clojure.lang.Var" "invoke"] :var-deref
+   ["clojure.lang.Var" "applyTo"] :var-deref
+   ["clojure.lang.LazySeq" "sval"] :seq
+   ["clojure.lang.LazySeq" "seq"] :seq
+   ["clojure.lang.RT" "seq"] :seq
+   ["clojure.lang.Agent$Action" "doRun"] :agent-run
+   ["clojure.lang.Compiler" "eval"] :eval})
+
+(defn elem-collapse-type
+  "For the given trace element and tag-map, returns a keyword describing
+  the reason for collapsing this element, or nil if the frame should not
+  be collapsed."
+  [{:keys [class method]} tag-map]
+  (tag-map [class method]))
+
+(defn collapse-elems
+  "Returns the given parsed elements except for those that are not
+  generally helpful to understanding the stack trace. This includes
+  calls to apply, the invoke methods of clojure functions, and others.
+  The nature of each removed element is recorded in a set of :tags on
+  the element that caused it."
+  [parsed-elems]
+  (first
+   (reduce (fn [[stack tags] elem]
+             (if-let [new-tag (elem-collapse-type elem tag-map)]
+               [stack (conj tags new-tag)]
+               [(conj stack (conj elem (when (seq tags) [:tags tags]))) #{}]))
+           [[] #{}]
+           parsed-elems)))
+
+(defn shorten-messages
+  "Frequently an exception message in a chain of causes will repeat
+  the message of its cause, perhaps with some additional text. This
+  function takes a sequence of parsed causes and replaces the
+  duplicate text in such situations with elipses."
+  [parsed-causes]
+  (for [[c prev-c] (map list parsed-causes (cons nil parsed-causes))]
+    (if-not (:message prev-c)
+      c
+      (assoc c :message
+             (string/replace (or (:message c) "No message")
+                             (:message prev-c)
+                             "…")))))
+
+(defmacro safety-net
+  "Catches and prints exceptions thrown in its body using the stock
+  Java stacktrace printer. Meant to be used internally by this library
+  in contexts where a bug in the library might otherwise ruin the
+  chances of getting any stack trace at all."
+  [original-exception & body]
+  `(try
+     ~@body
+     (catch Throwable t#
+       (println "Error in clj-stacktrace:")
+       (.printStackTrace t# *out*)
+       (println "\nOriginal exception:")
+       (.printStackTrace ~original-exception *out*)
+       (throw ~original-exception))))
