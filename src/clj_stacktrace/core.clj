@@ -105,9 +105,11 @@
               :message       (.getMessage causer-e)
               :trace-elems   parsed-elems
               :trimmed-elems (trim-redundant parsed-elems caused-parsed-elems)}]
-    (if-let [cause (.getCause causer-e)]
-      (assoc base :cause (parse-cause-exception cause parsed-elems))
-      base)))
+    (conj base
+          (when-let [cause (.getCause causer-e)]
+            [:cause (parse-cause-exception cause parsed-elems)])
+          (when-let [data (ex-data causer-e)]
+            [:data data]))))
 
 (defn parse-exception
   "Returns a Clojure map providing usefull informaiton about the exception.
@@ -121,9 +123,11 @@
         base {:class       (class e)
               :message     (.getMessage e)
               :trace-elems parsed-elems}]
-    (if-let [cause (.getCause e)]
-      (assoc base :cause (parse-cause-exception cause parsed-elems))
-      base)))
+    (conj base
+          (when-let [cause (.getCause e)]
+            [:cause (parse-cause-exception cause parsed-elems)])
+          (when-let [data (ex-data e)]
+            [:data data]))))
 
 (defn cause-seq [e]
   "Takes a parsed exception and returns a seq of parsed exception
