@@ -16,13 +16,12 @@
                   #"_" "-"))
 
 ;; drop everything before and including the first $
-;; drop everything after and including and the second $
-;; drop any __xyz suffixes
+;; drop any __123 suffixes
 ;; sub _PLACEHOLDER_ for the corresponding char
+;; replace function nesting $'s with °
 (def clojure-fn-subs
   [[#"^[^$]*\$" ""]
-   [#"\$.*"    ""]
-   [#"__\d+.*"  ""]
+   [#"__\d+($|\$)"  "$1"]
    [#"_QMARK_"  "?"]
    [#"_BANG_"   "!"]
    [#"_PLUS_"   "+"]
@@ -31,7 +30,8 @@
    [#"_EQ_"     "="]
    [#"_STAR_"   "*"]
    [#"_SLASH_"  "/"]
-   [#"_"        "-"]])
+   [#"_"        "-"]
+   [#"\$"       "°"]])
 
 (defn- clojure-fn
   "Returns the clojure function name implied by the bytecode class name."
